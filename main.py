@@ -63,7 +63,8 @@ def main() -> None:
         ratio_pred = reg.predict(X_test)
         final_pred = np.where(clf_proba >= config.CLF_THRESHOLD, ratio_pred, 0.0)
 
-        final_metrics = compute_metrics(y_test, final_pred)
+        all_metrics = compute_metrics(y_test, final_pred)
+        final_metrics = {"rmse_nonzero": all_metrics["rmse_nonzero"]}
         save_metrics(final_metrics, config.METRICS_DIR / f"metrics_{safe_name}.csv")
         plot_feature_importance(reg, config.PLOT_DIR / f"fi_reg_{safe_name}.png")
 

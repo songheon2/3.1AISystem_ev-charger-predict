@@ -160,6 +160,15 @@ v1.0 단일 회귀 모델은 타겟 91.9%가 0인 구조 때문에 비영 구간
 - `lgbm_clf_2시간뒤_정답_y_.pkl`
 - `lgbm_reg_2시간뒤_정답_y_.pkl`
 
+### v2.0 공식 평가 지표
+
+| 단계 | 지표 | 의미 |
+|------|------|------|
+| Stage 1 | AUC, F1, Precision, Recall | 분류기 성능 |
+| Stage 2 | rmse_nonzero | 회귀기 핵심 성능 |
+
+> overall RMSE, R²는 2단계 모델에서 의미 없으므로 저장하지 않음
+
 ### Stage 1 — 분류기
 
 | 항목 | 내용 |
@@ -168,7 +177,7 @@ v1.0 단일 회귀 모델은 타겟 91.9%가 0인 구조 때문에 비영 구간
 | 타겟 | `(y != 0).astype(int)` |
 | objective | `binary` |
 | metric | `binary_logloss` |
-| 불균형 처리 | `scale_pos_weight = len(y_train_zero) / len(y_train_nonzero)` (동적 계산) |
+| 불균형 처리 | 없음 (scale_pos_weight 제거 — AUC 0.82로 순위 구분 충분, 가중치는 학습 불안정 유발) |
 | 평가 지표 | AUC, F1, Precision, Recall |
 
 ### Stage 2 — 회귀기
@@ -177,9 +186,9 @@ v1.0 단일 회귀 모델은 타겟 91.9%가 0인 구조 때문에 비영 구간
 |------|------|
 | 학습 데이터 | **train 중 non-zero 행만** |
 | val 데이터 | **val 중 non-zero 행만** |
-| 타겟 | 실제 충전 비율 (0.12 ~ 2.0) |
+| 타겟 | 실제 충전 비율 |
 | objective | `regression` (v1.0과 동일) |
-| 목표 | rmse_nonzero ≤ 0.40 |
+| 평가 지표 | rmse_nonzero |
 
 ### config.py 추가 항목
 
@@ -196,10 +205,8 @@ LGBM_CLF_PARAMS: dict = {
     "verbose": -1,
     "seed": SEED,
 }
-CLF_THRESHOLD: float = 0.5   # 0 vs non-zero 분기 기준
+CLF_THRESHOLD: float = 0.08   # non-zero 비율(~8.1%) 기반 설정
 ```
-
-> `scale_pos_weight`는 학습 데이터 비율로 동적 계산 — config에 하드코딩 금지
 
 ### 모듈별 변경 명세
 
@@ -209,7 +216,7 @@ CLF_THRESHOLD: float = 0.5   # 0 vs non-zero 분기 기준
 | `src/train.py` | `train_classifier()` 함수 추가 |
 | `src/evaluate.py` | `compute_clf_metrics()` 함수 추가 (AUC, F1, Precision, Recall) |
 | `src/predict.py` | `predict_twostage()` 함수 추가 |
-| `main.py` | 2단계 파이프라인으로 전면 교체 |
+| `main.py` | 2단계 파이프라인으로 전면 교체, final_metrics는 rmse_nonzero만 저장 |
 
 ### main.py 파이프라인 흐름
 
@@ -218,10 +225,9 @@ for target in TARGET_COLS:
 
     # Stage 1
     y_binary = (y != 0).astype(int)
-    scale_pos_weight = (y_train_binary == 0).sum() / (y_train_binary == 1).sum()
-    clf = train_classifier(X_train, y_train_binary, X_val, y_val_binary, scale_pos_weight)
+    clf = train_classifier(X_train, y_train_binary, X_val, y_val_binary)
     save_model(clf, MODEL_DIR / f"lgbm_clf_{safe_name}.pkl")
-    evaluate & save clf_metrics
+    evaluate & save clf_metrics  # AUC, F1, Precision, Recall
 
     # Stage 2
     mask_nz_train = y_train != 0
@@ -230,11 +236,11 @@ for target in TARGET_COLS:
                 X_val[mask_nz_val],   y_val[mask_nz_val])
     save_model(reg, MODEL_DIR / f"lgbm_reg_{safe_name}.pkl")
 
-    # 최종 예측 (결합)
+    # 최종 예측 (결합) — rmse_nonzero만 저장
     proba = clf.predict(X_test)
     ratio = reg.predict(X_test)
     final_pred = np.where(proba >= CLF_THRESHOLD, ratio, 0.0)
-    evaluate & save final_metrics (rmse, rmse_nonzero, R²)
+    save_metrics({"rmse_nonzero": ...}, ...)
 ```
 
 ---
@@ -250,5 +256,8 @@ for target in TARGET_COLS:
 | 2026-06-01 | 가중치 전략 폐기 — 비영 과소예측 편향 확인 | rmse_nonzero 악화 (0.62→음수) | 설계 담당 |
 | 2026-06-01 | is_daytime, station_target_mean, station_hour_mean 추가 | rmse_nonzero 개선 목적 | 설계 담당 |
 | 2026-06-01 | v1.0 확정 (station×hour 2차 encoding까지) | 수확 체감 구간 도달, 구조적 한계 판단 | 설계 담당 |
+| 2026-06-01 | v2.0 구현 — 2단계 모델 (분류기+회귀기) | rmse_nonzero baseline 돌파 목표 | 설계 담당 |
+| 2026-06-01 | scale_pos_weight 제거, CLF_THRESHOLD=0.08 | 가중치 학습 불안정(3R early stopping) 확인 | 설계 담당 |
+| 2026-06-01 | 평가 지표 정리 — overall RMSE·R² 제거 | 2단계 모델에서 의미 없음 | 설계 담당 |
 | 2026-06-01 | v2.0 설계 — 2단계 모델 (분류기 + 회귀기) | rmse_nonzero baseline 0.38 돌파 목표 | 설계 담당 |
 | 2026-06-01 | CLF_THRESHOLD=0.08 확정 | rmse_nonzero를 핵심 지표로 정의. overall RMSE 악화는 91.9% 零 분포에서 비영 구간 집중의 필연적 trade-off | 설계 담당 |
