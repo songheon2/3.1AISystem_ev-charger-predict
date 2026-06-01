@@ -135,6 +135,110 @@ ev-charger-predict/
 
 ---
 
+## v2.0 설계 — 2단계 모델
+
+### 배경
+
+v1.0 단일 회귀 모델은 타겟 91.9%가 0인 구조 때문에 비영 구간 예측에 편향(rmse_nonzero 0.62, 단순 평균 baseline ~0.38보다 낮음). 구조적 해결책으로 2단계 분리.
+
+### 모델 구조
+
+```
+입력 피처 (18개)
+      │
+      ▼
+[Stage 1] LightGBM Classifier  →  P(non-zero)
+      │
+      ├── P < CLF_THRESHOLD  →  예측값 = 0.0
+      │
+      └── P ≥ CLF_THRESHOLD  →  [Stage 2] LightGBM Regressor  →  예측 비율
+```
+
+**모델 파일 (타겟 2개 × 스테이지 2개 = 4개)**
+- `lgbm_clf_1시간뒤_정답_y_.pkl` — Stage 1 분류기
+- `lgbm_reg_1시간뒤_정답_y_.pkl` — Stage 2 회귀기
+- `lgbm_clf_2시간뒤_정답_y_.pkl`
+- `lgbm_reg_2시간뒤_정답_y_.pkl`
+
+### Stage 1 — 분류기
+
+| 항목 | 내용 |
+|------|------|
+| 학습 데이터 | 전체 train 행 |
+| 타겟 | `(y != 0).astype(int)` |
+| objective | `binary` |
+| metric | `binary_logloss` |
+| 불균형 처리 | `scale_pos_weight = len(y_train_zero) / len(y_train_nonzero)` (동적 계산) |
+| 평가 지표 | AUC, F1, Precision, Recall |
+
+### Stage 2 — 회귀기
+
+| 항목 | 내용 |
+|------|------|
+| 학습 데이터 | **train 중 non-zero 행만** |
+| val 데이터 | **val 중 non-zero 행만** |
+| 타겟 | 실제 충전 비율 (0.12 ~ 2.0) |
+| objective | `regression` (v1.0과 동일) |
+| 목표 | rmse_nonzero ≤ 0.40 |
+
+### config.py 추가 항목
+
+```python
+# Stage 1 — Classifier
+LGBM_CLF_PARAMS: dict = {
+    "objective": "binary",
+    "metric": "binary_logloss",
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1,
+    "seed": SEED,
+}
+CLF_THRESHOLD: float = 0.5   # 0 vs non-zero 분기 기준
+```
+
+> `scale_pos_weight`는 학습 데이터 비율로 동적 계산 — config에 하드코딩 금지
+
+### 모듈별 변경 명세
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `config.py` | `LGBM_CLF_PARAMS`, `CLF_THRESHOLD` 추가 |
+| `src/train.py` | `train_classifier()` 함수 추가 |
+| `src/evaluate.py` | `compute_clf_metrics()` 함수 추가 (AUC, F1, Precision, Recall) |
+| `src/predict.py` | `predict_twostage()` 함수 추가 |
+| `main.py` | 2단계 파이프라인으로 전면 교체 |
+
+### main.py 파이프라인 흐름
+
+```python
+for target in TARGET_COLS:
+
+    # Stage 1
+    y_binary = (y != 0).astype(int)
+    scale_pos_weight = (y_train_binary == 0).sum() / (y_train_binary == 1).sum()
+    clf = train_classifier(X_train, y_train_binary, X_val, y_val_binary, scale_pos_weight)
+    save_model(clf, MODEL_DIR / f"lgbm_clf_{safe_name}.pkl")
+    evaluate & save clf_metrics
+
+    # Stage 2
+    mask_nz_train = y_train != 0
+    mask_nz_val   = y_val   != 0
+    reg = train(X_train[mask_nz_train], y_train[mask_nz_train],
+                X_val[mask_nz_val],   y_val[mask_nz_val])
+    save_model(reg, MODEL_DIR / f"lgbm_reg_{safe_name}.pkl")
+
+    # 최종 예측 (결합)
+    proba = clf.predict(X_test)
+    ratio = reg.predict(X_test)
+    final_pred = np.where(proba >= CLF_THRESHOLD, ratio, 0.0)
+    evaluate & save final_metrics (rmse, rmse_nonzero, R²)
+```
+
+---
+
 ## 설계 변경 이력
 
 | 날짜 | 변경 내용 | 이유 | 결정자 |
@@ -143,3 +247,7 @@ ev-charger-predict/
 | 2026-06-01 | dataset.py 누수 수정: target_col → 모든 TARGET_COLS drop | 타겟 컬럼이 X에 포함되는 누수 발견 | 설계 담당 |
 | 2026-06-01 | 시간 파생 피처 추가 (hour, dayofweek, is_weekend) | R² 개선 목적 | 설계 담당 |
 | 2026-06-01 | 불균형 처리: 비영 샘플 가중치 (NONZERO_WEIGHT=9) | 타겟 0.0 비율 91.9% 대응 | 설계 담당 |
+| 2026-06-01 | 가중치 전략 폐기 — 비영 과소예측 편향 확인 | rmse_nonzero 악화 (0.62→음수) | 설계 담당 |
+| 2026-06-01 | is_daytime, station_target_mean, station_hour_mean 추가 | rmse_nonzero 개선 목적 | 설계 담당 |
+| 2026-06-01 | v1.0 확정 (station×hour 2차 encoding까지) | 수확 체감 구간 도달, 구조적 한계 판단 | 설계 담당 |
+| 2026-06-01 | v2.0 설계 — 2단계 모델 (분류기 + 회귀기) | rmse_nonzero baseline 0.38 돌파 목표 | 설계 담당 |
