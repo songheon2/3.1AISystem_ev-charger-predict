@@ -251,3 +251,4 @@ for target in TARGET_COLS:
 | 2026-06-01 | is_daytime, station_target_mean, station_hour_mean 추가 | rmse_nonzero 개선 목적 | 설계 담당 |
 | 2026-06-01 | v1.0 확정 (station×hour 2차 encoding까지) | 수확 체감 구간 도달, 구조적 한계 판단 | 설계 담당 |
 | 2026-06-01 | v2.0 설계 — 2단계 모델 (분류기 + 회귀기) | rmse_nonzero baseline 0.38 돌파 목표 | 설계 담당 |
+| 2026-06-01 | CLF_THRESHOLD=0.08 확정 | rmse_nonzero를 핵심 지표로 정의. overall RMSE 악화는 91.9% 零 분포에서 비영 구간 집중의 필연적 trade-off | 설계 담당 |

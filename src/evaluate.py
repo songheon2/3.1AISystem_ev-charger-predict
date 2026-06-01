@@ -9,7 +9,15 @@ matplotlib.rc("font", family="Malgun Gothic")
 matplotlib.rc("axes", unicode_minus=False)
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+    f1_score,
+)
 
 import config
 
@@ -33,6 +41,16 @@ def save_metrics(metrics: dict[str, float], path: Path) -> None:
     logger.info(f"Metrics saved to {path}")
     for k, v in metrics.items():
         logger.info(f"  {k}: {v:.4f}")
+
+
+def compute_clf_metrics(y_true: pd.Series, y_pred_proba: np.ndarray) -> dict[str, float]:
+    y_pred_binary = (y_pred_proba >= 0.5).astype(int)
+    return {
+        "auc": float(roc_auc_score(y_true, y_pred_proba)),
+        "f1": float(f1_score(y_true, y_pred_binary)),
+        "precision": float(precision_score(y_true, y_pred_binary)),
+        "recall": float(recall_score(y_true, y_pred_binary)),
+    }
 
 
 def plot_feature_importance(model: lgb.Booster, path: Path) -> None:

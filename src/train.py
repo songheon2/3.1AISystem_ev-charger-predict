@@ -36,6 +36,33 @@ def train(
     return model
 
 
+def train_classifier(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+) -> lgb.Booster:
+    params = {**config.LGBM_CLF_PARAMS}
+    dtrain = lgb.Dataset(X_train, label=y_train)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+
+    callbacks = [
+        lgb.early_stopping(config.EARLY_STOPPING_ROUNDS, verbose=True),
+        lgb.log_evaluation(period=100),
+    ]
+
+    model = lgb.train(
+        params,
+        dtrain,
+        num_boost_round=config.NUM_BOOST_ROUND,
+        valid_sets=[dval],
+        callbacks=callbacks,
+    )
+
+    logger.info(f"Classifier best iteration: {model.best_iteration}")
+    return model
+
+
 def save_model(model: lgb.Booster, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, path)

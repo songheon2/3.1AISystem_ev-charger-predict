@@ -39,3 +39,17 @@ LGBM_PARAMS: dict = {
 
 NUM_BOOST_ROUND = 3000
 EARLY_STOPPING_ROUNDS = 100
+
+# --- Stage 1: Classifier ---
+LGBM_CLF_PARAMS: dict = {
+    "objective": "binary",
+    "metric": "binary_logloss",
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1,
+    "seed": SEED,
+}
+CLF_THRESHOLD: float = 0.08
