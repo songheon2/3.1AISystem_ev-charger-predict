@@ -1,0 +1,9 @@
+data/raw/
+data/processed/
+outputs/models/
+outputs/metrics/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
+*.log
