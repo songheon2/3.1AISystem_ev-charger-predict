@@ -2,7 +2,7 @@
 
 ## 프로젝트 개요
 
-- **데이터**: `ratio_dataset_202501.csv` (2025-01-01 ~ 2025-01-31, 1,539,336행 × 17컬럼)
+- **데이터**: `ratio_dataset_202501.csv` ~ `ratio_dataset_202512.csv` (2025-01-01 ~ 2025-12-31, 월별 파일 12개)
 - **충전소 수**: 2,069개
 - **목표**: 1시간 뒤 / 2시간 뒤 충전 비율 예측 (회귀)
 - **모델**: LightGBM
@@ -23,7 +23,7 @@ ev-charger-predict/
 │   ├── models/         # lgbm_*.pkl
 │   ├── plots/          # fi_*.png
 │   └── metrics/        # metrics_*.csv
-├── data/processed/     # ratio_dataset_202501.csv
+├── data/processed/     # ratio_dataset_202501.csv ~ ratio_dataset_202512.csv (월별 12개)
 ├── config.py           # 모든 상수·하이퍼파라미터
 ├── main.py             # 메인 파이프라인
 ├── CLAUDE.md           # 이 파일 (single source of truth)
@@ -48,17 +48,31 @@ ev-charger-predict/
 ## Split 전략
 
 - **방식**: 시간 기반 split (랜덤 split 금지 — 미래 누수 방지)
-- Train: `~ 2025-01-24 23:00`
-- Val: `2025-01-25 00:00 ~ 2025-01-27 23:00`
-- Test: `2025-01-28 00:00 ~`
+- Train: `~ 2025-10-31 23:00` (10개월)
+- Val: `2025-11-01 00:00 ~ 2025-11-30 23:00` (1개월)
+- Test: `2025-12-01 00:00 ~` (1개월)
 
 ---
 
 ## 피처 엔지니어링
 
-- `기준시간` → `hour`, `dayofweek`, `is_weekend` 파생 후 원본 drop
+- `기준시간` → `hour`, `dayofweek`, `is_weekend`, `is_daytime` 파생 후 원본 drop
 - `CAT_COLS` → `category` dtype 변환 (LightGBM 자동 인식)
-- 비영 샘플 가중치: `config.NONZERO_WEIGHT` 참조 (기본값 9 → 비영 가중치 10, 영 가중치 1)
+- target encoding: `station_target_mean`, `station_hour_mean` (train 기간 기준, leakage 없음)
+
+### Lag 피처 (v2.1 추가)
+
+| 피처 | 의미 | 계산 |
+|------|------|------|
+| `lag_1h` | 1시간 전 충전 비율 | `groupby('충전소ID')[target_col].shift(1)` |
+| `lag_2h` | 2시간 전 충전 비율 | `groupby('충전소ID')[target_col].shift(2)` |
+| `lag_24h` | 24시간 전 충전 비율 (전일 동시간대) | `groupby('충전소ID')[target_col].shift(24)` |
+
+**구현 규칙**
+- 전체 df를 `(충전소ID, 기준시간)` 기준으로 정렬한 뒤 lag 계산 (split 전)
+- split 경계를 자연스럽게 넘어 val/test 행도 train 과거값을 lag로 참조 — 정상 동작
+- 결측(NaN) 그대로 유지 — LightGBM 자체 처리
+- `target_col`에서 shift하므로 target마다 독립 계산 (main.py 루프 내 split_data 호출로 자동 처리)
 
 ---
 
@@ -68,8 +82,8 @@ ev-charger-predict/
 - 모든 상수·하이퍼파라미터 중앙 관리
 
 ### `src/dataset.py`
-- `load_data(file_path) -> DataFrame`: CSV 로드, `기준시간` datetime 변환
-- `split_data(df, target_col) -> (X_train, X_val, X_test, y_train, y_val, y_test)`: 피처 엔지니어링 + 시간 기반 split
+- `load_data(data_dir: Path) -> DataFrame`: `ratio_dataset_*.csv` 전체 glob → 시간순 정렬 후 concat, `기준시간` datetime 변환
+- `split_data(df, target_col) -> (X_train, X_val, X_test, y_train, y_val, y_test)`: 피처 엔지니어링 + lag 피처 + 시간 기반 split
 
 ### `src/train.py`
 - `train(X_train, y_train, X_val, y_val) -> Booster`: 샘플 가중치 포함 학습
@@ -245,6 +259,149 @@ for target in TARGET_COLS:
 
 ---
 
+## v3.0 설계 — 만차 분류 모델
+
+### 목적 전환
+
+실제 사용 목적이 "1시간/2시간 뒤 충전소가 꽉 차는지 여부"이므로, 비율 회귀 대신 **만차 여부 이진 분류**로 전환.
+
+### 모델 구조
+
+```
+입력 피처 (lag 포함)
+      │
+      ▼
+[LightGBM Classifier]  →  P(만차)
+      │
+      ├── P < FULL_CLF_THRESHOLD  →  비만차
+      └── P ≥ FULL_CLF_THRESHOLD  →  만차
+```
+
+### 데이터 설정
+
+| 항목 | 내용 |
+|------|------|
+| 학습 데이터 | **1개월 (ratio_dataset_202501.csv)** |
+| 타겟 | `(y == 1.0).astype(int)` — 만차 여부 |
+| 클래스 분포 | 만차 3.92% / 비만차 96.08% |
+
+### Split (1개월 기준 복귀)
+
+| 구간 | 기간 |
+|------|------|
+| Train | ~ 2025-01-24 23:00 |
+| Val | 2025-01-25 00:00 ~ 2025-01-27 23:00 |
+| Test | 2025-01-28 00:00 ~ |
+
+### 불균형 처리
+
+**Negative Undersampling (train only)**
+- train set에서 negative를 `FULL_CLF_NEG_RATIO = 5` 비율로 random sampling
+- positive : negative = 1 : 5 (원본 1:25 → 완화)
+- val / test는 원본 분포 유지 (실제 운용 환경 반영)
+- `random_state = config.SEED` 고정
+
+### threshold 탐색
+
+val set 기준 **Recall ≥ `FULL_CLF_TARGET_RECALL`(0.85)를 만족하는 최대 threshold** 탐색.
+최대 threshold를 택해 Precision 손실 최소화.
+
+```python
+thresholds = np.arange(0.01, 0.50, 0.01)
+valid = [t for t in thresholds if recall_score(y_val, proba >= t) >= config.FULL_CLF_TARGET_RECALL]
+best_threshold = max(valid) if valid else thresholds[0]
+```
+
+목표 Recall을 만족하는 후보가 없으면 가장 낮은 threshold(0.01) 사용.
+
+### 평가 지표 (우선순위 순)
+
+| 순위 | 지표 | 의미 |
+|------|------|------|
+| 1 | Recall | 실제 만차를 얼마나 잡는가 (핵심) |
+| 2 | F2 | Recall 2배 가중 조화평균 |
+| 3 | F1 | 균형 지표 |
+| 4 | Precision | 만차 예측 중 실제 만차 비율 |
+| 5 | AUC | 모델 분리 능력 |
+
+### config.py 추가 항목
+
+```python
+FULL_CLF_DATA_FILE: str = "ratio_dataset_202501.csv"
+FULL_CLF_TRAIN_END: str = "2025-01-24 23:00:00"
+FULL_CLF_VAL_END: str   = "2025-01-27 23:00:00"
+FULL_CLF_NEG_RATIO: int = 5        # train negative : positive 비율
+FULL_CLF_TARGET_RECALL: float = 0.85  # threshold 탐색 목표 Recall
+
+LGBM_FULL_CLF_PARAMS: dict = {
+    "objective": "binary",
+    "metric": "binary_logloss",
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "verbose": -1,
+    "seed": SEED,
+}
+```
+
+### 모듈별 변경 명세
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `config.py` | `FULL_CLF_NEG_RATIO`, `FULL_CLF_TARGET_RECALL` 추가 |
+| `src/evaluate.py` | `find_best_threshold_f2` → `find_threshold_for_recall()` 교체 |
+| `main.py` | undersampling 블록 추가, threshold 탐색 함수 교체 |
+
+### main.py 파이프라인 흐름
+
+```python
+df = pd.read_csv(DATA_DIR / FULL_CLF_DATA_FILE, encoding='utf-8-sig')
+df['기준시간'] = pd.to_datetime(df['기준시간'])
+
+for target in TARGET_COLS:
+    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+        df, target,
+        train_end=config.FULL_CLF_TRAIN_END,
+        val_end=config.FULL_CLF_VAL_END,
+    )
+
+    y_train_full = (y_train == 1.0).astype(int)
+    y_val_full   = (y_val   == 1.0).astype(int)
+    y_test_full  = (y_test  == 1.0).astype(int)
+
+    # --- Negative Undersampling (train only) ---
+    pos_idx = X_train[y_train_full == 1].index
+    neg_idx = X_train[y_train_full == 0].sample(
+        n=len(pos_idx) * config.FULL_CLF_NEG_RATIO,
+        random_state=config.SEED,
+    ).index
+    sample_idx = pos_idx.union(neg_idx)
+    X_train_s = X_train.loc[sample_idx]
+    y_train_s = y_train_full.loc[sample_idx]
+
+    clf = train_full_classifier(X_train_s, y_train_s, X_val, y_val_full)
+    save_model(clf, MODEL_DIR / f"lgbm_full_{safe_name}.pkl")
+
+    # val Recall >= TARGET_RECALL 만족하는 최대 threshold 탐색
+    proba_val = clf.predict(X_val)
+    best_threshold = find_threshold_for_recall(proba_val, y_val_full, config.FULL_CLF_TARGET_RECALL)
+
+    # test 평가
+    proba_test = clf.predict(X_test)
+    metrics = compute_full_clf_metrics(y_test_full, proba_test, best_threshold)
+    save_metrics(metrics, METRICS_DIR / f"full_clf_metrics_{safe_name}.csv")
+    plot_feature_importance(clf, PLOT_DIR / f"fi_full_{safe_name}.png")
+```
+
+### 모델 파일
+
+- `lgbm_full_1시간뒤_정답_y_.pkl`
+- `lgbm_full_2시간뒤_정답_y_.pkl`
+
+---
+
 ## 설계 변경 이력
 
 | 날짜 | 변경 내용 | 이유 | 결정자 |
@@ -261,3 +418,13 @@ for target in TARGET_COLS:
 | 2026-06-01 | 평가 지표 정리 — overall RMSE·R² 제거 | 2단계 모델에서 의미 없음 | 설계 담당 |
 | 2026-06-01 | v2.0 설계 — 2단계 모델 (분류기 + 회귀기) | rmse_nonzero baseline 0.38 돌파 목표 | 설계 담당 |
 | 2026-06-01 | CLF_THRESHOLD=0.08 확정 | rmse_nonzero를 핵심 지표로 정의. overall RMSE 악화는 91.9% 零 분포에서 비영 구간 집중의 필연적 trade-off | 설계 담당 |
+| 2026-06-02 | 데이터 확장: 1월 단일 → 1~12월 12개 파일 | 실제 운용 데이터 전체 반영 | 설계 담당 |
+| 2026-06-02 | Split 기준일 변경: Train~10월말 / Val 11월 / Test 12월 | 12개월 데이터 기반 비율 재설정 (10:1:1) | 설계 담당 |
+| 2026-06-02 | load_data() 인터페이스 변경: file_path → data_dir (glob 방식) | 월별 파일 12개 자동 병합 | 설계 담당 |
+| 2026-06-02 | v2.1 — lag 피처 추가 (lag_1h, lag_2h, lag_24h) | 12개월 데이터로도 baseline 미돌파 → 시계열 맥락 부재가 원인 | 설계 담당 |
+| 2026-06-02 | v3.0 — 목적 전환: 비율 회귀 → 만차 여부 이진 분류 | 실사용 목적이 만차 여부 판단임을 확인 | 설계 담당 |
+| 2026-06-02 | v3.0 — 데이터 1개월(202501), split 1월 기준 복귀 | 빠른 검증 우선, 성능 확인 후 확장 결정 | 설계 담당 |
+| 2026-06-02 | v3.0 — scale_pos_weight=24, F2 threshold 탐색 | Recall 우선 목표, 만차 3.92% 불균형 대응 | 설계 담당 |
+| 2026-06-02 | v3.0 — scale_pos_weight 제거 | 1R 조기종료 학습 불안정 (v2.0과 동일 현상), threshold로만 대응 | 설계 담당 |
+| 2026-06-02 | v3.0 — Negative Undersampling 1:5 + Recall≥0.85 threshold 탐색 | 극단적 Recall 우선 전략, 손실 함수 왜곡 없이 불균형 대응 | 설계 담당 |
+| 2026-06-02 | v3.0 — threshold 기준 변경: Recall≥0.85 → F2 최대화 후 Recall≥0.85 복귀 | Precision 7%가 낮지만 Recall 우선 목표 재확인 | 설계 담당 |

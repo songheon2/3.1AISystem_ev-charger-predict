@@ -17,6 +17,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
     f1_score,
+    fbeta_score,
 )
 
 import config
@@ -50,6 +51,32 @@ def compute_clf_metrics(y_true: pd.Series, y_pred_proba: np.ndarray) -> dict[str
         "f1": float(f1_score(y_true, y_pred_binary)),
         "precision": float(precision_score(y_true, y_pred_binary)),
         "recall": float(recall_score(y_true, y_pred_binary)),
+    }
+
+
+def find_threshold_for_recall(
+    y_proba: np.ndarray,
+    y_true: pd.Series,
+    target_recall: float,
+) -> float:
+    thresholds = np.arange(0.01, 0.50, 0.01)
+    valid = [t for t in thresholds if recall_score(y_true, y_proba >= t) >= target_recall]
+    return float(max(valid)) if valid else float(thresholds[0])
+
+
+def compute_full_clf_metrics(
+    y_true: pd.Series,
+    y_proba: np.ndarray,
+    threshold: float,
+) -> dict[str, float]:
+    y_pred = (y_proba >= threshold).astype(int)
+    return {
+        "recall": float(recall_score(y_true, y_pred)),
+        "f2": float(fbeta_score(y_true, y_pred, beta=2)),
+        "f1": float(f1_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred)),
+        "auc": float(roc_auc_score(y_true, y_proba)),
+        "best_threshold": threshold,
     }
 
 
