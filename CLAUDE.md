@@ -4,8 +4,8 @@
 
 - **데이터**: `ratio_dataset_202501.csv` ~ `ratio_dataset_202512.csv` (2025-01-01 ~ 2025-12-31, 월별 파일 12개)
 - **충전소 수**: 2,069개
-- **목표**: 1시간 뒤 / 2시간 뒤 충전 비율 예측 (회귀)
-- **모델**: LightGBM
+- **목표**: 1시간 뒤 / 2시간 뒤 만차 여부 예측 (이진 분류)
+- **모델**: LightGBM (v3.0 만차 분류기)
 
 ---
 
@@ -18,14 +18,19 @@ ev-charger-predict/
 │   ├── dataset.py      # 데이터 로드, 피처 엔지니어링, 시간 기반 split
 │   ├── train.py        # LightGBM 학습, 모델 저장/로드
 │   ├── evaluate.py     # 메트릭 계산, 플롯 저장
-│   └── predict.py      # 추론
+│   ├── predict.py      # 추론 (배치)
+│   └── infer.py        # 실시간 추론 파이프라인 (API 데이터 → 만차 예측)
 ├── outputs/
 │   ├── models/         # lgbm_*.pkl
 │   ├── plots/          # fi_*.png
-│   └── metrics/        # metrics_*.csv
-├── data/processed/     # ratio_dataset_202501.csv ~ ratio_dataset_202512.csv (월별 12개)
+│   ├── metrics/        # metrics_*.csv
+│   ├── encodings/      # station_meta.pkl, station_encodings.pkl
+│   └── history/        # station_history.csv (lag 이력)
+├── data/
+│   ├── processed/      # ratio_dataset_202501.csv ~ ratio_dataset_202512.csv (월별 12개)
+│   └── realtime/       # 실시간 API CSV 입력 파일
 ├── config.py           # 모든 상수·하이퍼파라미터
-├── main.py             # 메인 파이프라인
+├── main.py             # 학습 파이프라인
 ├── CLAUDE.md           # 이 파일 (single source of truth)
 └── CLAUDE.local.md     # 코딩 담당 전용 로컬 기록 (git 제외)
 ```
@@ -41,6 +46,7 @@ ev-charger-predict/
 | 범주형 | `유형`(5), `시도`(17), `시군구`(216) → category dtype |
 | 제외 컬럼 | `충전소ID`, `기준시간` (DROP_COLS) |
 | 결측 | 기온, 강수량 각 32,857건 — LightGBM 자체 처리 |
+| 데이터 품질 | 4월 데이터에 `ME#S` 접두 이상 ID 750개 확인 → 로드 시 제거 |
 | 타겟 분포 | 0.0이 약 91.9% (극도 불균형) |
 
 ---
@@ -82,7 +88,7 @@ ev-charger-predict/
 - 모든 상수·하이퍼파라미터 중앙 관리
 
 ### `src/dataset.py`
-- `load_data(data_dir: Path) -> DataFrame`: `ratio_dataset_*.csv` 전체 glob → 시간순 정렬 후 concat, `기준시간` datetime 변환
+- `load_data(data_dir: Path) -> DataFrame`: `ratio_dataset_*.csv` 전체 glob → 시간순 정렬 후 concat, `기준시간` datetime 변환, 비정상 충전소ID(`ME#S` 접두) 제거
 - `split_data(df, target_col) -> (X_train, X_val, X_test, y_train, y_val, y_test)`: 피처 엔지니어링 + lag 피처 + 시간 기반 split
 
 ### `src/train.py`
@@ -281,17 +287,18 @@ for target in TARGET_COLS:
 
 | 항목 | 내용 |
 |------|------|
-| 학습 데이터 | **1개월 (ratio_dataset_202501.csv)** |
+| 학습 데이터 | **12개월 (ratio_dataset_202501.csv ~ 202512.csv)** |
+| 로드 방식 | `load_data(DATA_DIR)` — glob 방식 |
 | 타겟 | `(y == 1.0).astype(int)` — 만차 여부 |
 | 클래스 분포 | 만차 3.92% / 비만차 96.08% |
 
-### Split (1개월 기준 복귀)
+### Split (12개월 기준)
 
 | 구간 | 기간 |
 |------|------|
-| Train | ~ 2025-01-24 23:00 |
-| Val | 2025-01-25 00:00 ~ 2025-01-27 23:00 |
-| Test | 2025-01-28 00:00 ~ |
+| Train | ~ 2025-10-31 23:00 (10개월) |
+| Val | 2025-11-01 00:00 ~ 2025-11-30 23:00 (1개월) |
+| Test | 2025-12-01 00:00 ~ (1개월) |
 
 ### 불균형 처리
 
@@ -322,14 +329,14 @@ best_threshold = max(valid) if valid else thresholds[0]
 | 2 | F2 | Recall 2배 가중 조화평균 |
 | 3 | F1 | 균형 지표 |
 | 4 | Precision | 만차 예측 중 실제 만차 비율 |
-| 5 | AUC | 모델 분리 능력 |
+| 5 | AUC | ROC 곡선 기반 분리 능력 |
+| 6 | PR-AUC | Precision-Recall 곡선 아래 면적 — 불균형 데이터에서 AUC보다 정직한 성능 지표 |
 
 ### config.py 추가 항목
 
 ```python
-FULL_CLF_DATA_FILE: str = "ratio_dataset_202501.csv"
-FULL_CLF_TRAIN_END: str = "2025-01-24 23:00:00"
-FULL_CLF_VAL_END: str   = "2025-01-27 23:00:00"
+FULL_CLF_TRAIN_END: str = "2025-10-31 23:00:00"
+FULL_CLF_VAL_END: str   = "2025-11-30 23:00:00"
 FULL_CLF_NEG_RATIO: int = 5        # train negative : positive 비율
 FULL_CLF_TARGET_RECALL: float = 0.85  # threshold 탐색 목표 Recall
 
@@ -357,8 +364,7 @@ LGBM_FULL_CLF_PARAMS: dict = {
 ### main.py 파이프라인 흐름
 
 ```python
-df = pd.read_csv(DATA_DIR / FULL_CLF_DATA_FILE, encoding='utf-8-sig')
-df['기준시간'] = pd.to_datetime(df['기준시간'])
+df = load_data(config.DATA_DIR)  # 12개월 전체 glob 로드
 
 for target in TARGET_COLS:
     X_train, X_val, X_test, y_train, y_val, y_test = split_data(
@@ -402,6 +408,160 @@ for target in TARGET_COLS:
 
 ---
 
+## 실시간 추론 모듈 설계 (src/infer.py)
+
+### API 데이터 명세
+
+| 컬럼 | 설명 | 비고 |
+|------|------|------|
+| csId | 충전소ID | 그룹 키 |
+| cpStat | 충전기 상태 | 1=사용가능, 나머지(2~7)=점유 |
+| statUpdateDatetime | 상태 갱신 시각 | `yyyyMMddHHmmss` 형식 |
+
+**점유 판정**: `cpStat != 1` → 점유  
+**충전소 비율**: `(cpStat != 1).sum() / 전체_충전기_수`
+
+---
+
+### 추론 파이프라인
+
+```
+실시간 API 응답 (충전기 목록)
+        │
+        ▼
+[1] aggregate_stations(api_rows)
+    csId 기준 그룹화
+    ratio = (cpStat != 1 수) / (전체 충전기 수)
+        │
+        ▼
+[2] build_features(station_df, current_dt)
+    시간 파생: hour, dayofweek, is_weekend, is_daytime
+    메타 조회: 유형·시도·시군구 ← station_meta.pkl
+    인코딩 조회: station_target_mean·station_hour_mean ← station_encodings.pkl
+    lag 조회: lag_1h·lag_2h·lag_24h ← station_history.csv
+        │
+        ▼
+[3] predict(feature_df)
+    lgbm_full_1시간뒤.pkl → P(만차_1h)
+    lgbm_full_2시간뒤.pkl → P(만차_2h)
+    threshold 적용 → 만차 여부 (bool)
+        │
+        ▼
+[4] update_history(station_df, current_dt)
+    현재 ratio를 station_history.csv에 append
+        │
+        ▼
+결과: csId별 {proba_1h, full_1h, proba_2h, full_2h}
+```
+
+---
+
+### 저장 파일 명세
+
+#### `outputs/encodings/station_meta.pkl`
+```python
+# dict: csId(str) → {"유형": ..., "시도": ..., "시군구": ...}
+{
+    "663": {"유형": "업무·관공서형", "시도": "서울특별시", "시군구": "관악구"},
+    ...
+}
+```
+- **생성 시점**: main.py 학습 완료 후
+- **생성 방법**: 학습 데이터에서 csId별 첫 행 기준 추출
+
+#### `outputs/encodings/station_encodings.pkl`
+```python
+# dict: csId(str) → {"station_target_mean": float, "hour_means": {hour(int): float}}
+{
+    "663": {"station_target_mean": 0.12, "hour_means": {0: 0.05, 1: 0.03, ..., 23: 0.08}},
+    ...
+}
+```
+- **생성 시점**: main.py 학습 완료 후
+- **생성 방법**: train 기간 기준으로 계산된 값 추출
+
+#### `outputs/history/station_history.csv`
+```
+csId,datetime,ratio
+663,2025-12-01 00:00:00,0.5
+663,2025-12-01 01:00:00,0.75
+...
+```
+- **업데이트**: 매 추론 호출 시 현재 ratio append
+- **조회**: lag_1h → current_dt - 1h, lag_2h → -2h, lag_24h → -24h 가장 가까운 행
+- **NaN 처리**: 이력 없으면 NaN → LightGBM 자체 처리
+
+---
+
+### `src/infer.py` 함수 인터페이스
+
+```python
+def load_realtime_csv(csv_path: Path) -> list[dict]:
+    """data/realtime/ CSV → list[dict] 변환"""
+    # statUpdateDatetime: str → datetime 파싱 포함
+
+def aggregate_stations(api_rows: list[dict]) -> pd.DataFrame:
+    """API 충전기 목록 → csId별 현재 충전 비율"""
+
+def load_encodings() -> tuple[dict, dict]:
+    """station_meta.pkl, station_encodings.pkl 로드"""
+
+def get_lag_features(csIds: list[str], current_dt: datetime) -> pd.DataFrame:
+    """history CSV에서 lag_1h·lag_2h·lag_24h 조회"""
+
+def build_features(
+    station_df: pd.DataFrame,
+    current_dt: datetime,
+    meta: dict,
+    encodings: dict,
+    lag_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """추론용 피처 행렬 조립 — 학습 피처와 동일한 컬럼 순서 보장"""
+
+def update_history(station_df: pd.DataFrame, current_dt: datetime) -> None:
+    """현재 ratio를 history CSV에 append"""
+
+def predict_realtime(api_rows: list[dict]) -> pd.DataFrame:
+    """전체 파이프라인 실행 — 외부에서 호출하는 단일 진입점"""
+    # Returns: DataFrame[csId, proba_1h, full_1h, proba_2h, full_2h]
+
+def predict_realtime_from_csv(csv_path: Path) -> pd.DataFrame:
+    """CSV 파일 경로를 받아 predict_realtime() 실행하는 편의 함수"""
+```
+
+---
+
+### main.py 추가 — 인코딩 저장
+
+학습 완료 후 아래 단계 추가:
+
+```python
+from src.dataset import export_encodings
+export_encodings(df, config.FULL_CLF_TRAIN_END)
+# → outputs/encodings/station_meta.pkl
+# → outputs/encodings/station_encodings.pkl
+```
+
+### `src/dataset.py` 추가 — `export_encodings()`
+
+```python
+def export_encodings(df: pd.DataFrame, train_end: str) -> None:
+    """학습 기간 기준 station 인코딩 테이블 생성 및 저장"""
+    # station_meta: csId → 유형·시도·시군구
+    # station_encodings: csId → {station_target_mean, hour_means{}}
+```
+
+### config.py 추가
+
+```python
+ENCODINGS_DIR  = ROOT_DIR / "outputs" / "encodings"
+HISTORY_DIR    = ROOT_DIR / "outputs" / "history"
+HISTORY_FILE   = HISTORY_DIR / "station_history.csv"
+REALTIME_DIR   = ROOT_DIR / "data" / "realtime"
+```
+
+---
+
 ## 설계 변경 이력
 
 | 날짜 | 변경 내용 | 이유 | 결정자 |
@@ -428,3 +588,8 @@ for target in TARGET_COLS:
 | 2026-06-02 | v3.0 — scale_pos_weight 제거 | 1R 조기종료 학습 불안정 (v2.0과 동일 현상), threshold로만 대응 | 설계 담당 |
 | 2026-06-02 | v3.0 — Negative Undersampling 1:5 + Recall≥0.85 threshold 탐색 | 극단적 Recall 우선 전략, 손실 함수 왜곡 없이 불균형 대응 | 설계 담당 |
 | 2026-06-02 | v3.0 — threshold 기준 변경: Recall≥0.85 → F2 최대화 후 Recall≥0.85 복귀 | Precision 7%가 낮지만 Recall 우선 목표 재확인 | 설계 담당 |
+| 2026-06-02 | v3.0 확정 — 데이터 12개월로 확장, split 10:1:1 | 1개월 모델 방향 확정 후 전체 데이터 학습 | 설계 담당 |
+| 2026-06-04 | 실시간 추론 모듈 설계 — src/infer.py, encodings, history | cpStat≠1 점유, CSV 이력 저장 방식 확정 | 설계 담당 |
+| 2026-06-04 | 실시간 입력 방식 확정 — CSV 파일 (data/realtime/) | predict_realtime_from_csv() 진입점 추가 | 설계 담당 |
+| 2026-06-05 | 데이터 품질 수정 — 4월 ME#S 이상 ID 750개 제거 후 재학습 | 다른 달에 없는 ID 형식, 노이즈로 판단 | 설계 담당 |
+| 2026-06-10 | PR-AUC 평가 지표 추가 | 불균형 데이터(3.92%)에서 ROC-AUC 과대평가 보완 | 설계 담당 |

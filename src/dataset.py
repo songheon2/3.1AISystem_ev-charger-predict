@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+import joblib
 import pandas as pd
 
 import config
@@ -15,7 +16,13 @@ def load_data(data_dir: Path) -> pd.DataFrame:
     dfs = [pd.read_csv(f, encoding="utf-8-sig") for f in files]
     logger.info(f"Loading {len(files)} file(s): {[f.name for f in files]}")
     df = pd.concat(dfs, ignore_index=True)
-    df["기준시간"] = pd.to_datetime(df["기준시간"])
+    df["기준시간"] = pd.to_datetime(df["기준시간"], format="mixed")
+
+    # 비정상 충전소ID 제거 (4월 ME#S 형식 이상 데이터)
+    before = len(df)
+    df = df[df["충전소ID"].astype(str).str.match(r"^\d+$")]
+    logger.info(f"비정상 ID 제거: {before - len(df):,}행 제거 → {len(df):,}행 유지")
+
     logger.info(f"Loaded data: {df.shape}")
     return df
 
@@ -76,3 +83,39 @@ def split_data(
 
     logger.info(f"[{target_col}] Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
     return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def export_encodings(df: pd.DataFrame, train_end: str) -> None:
+    mask_train = df["기준시간"] <= train_end
+    train_df = df[mask_train].copy()
+    train_df["_hour"] = train_df["기준시간"].dt.hour
+    train_df["_target_avg"] = train_df[config.TARGET_COLS].mean(axis=1)
+
+    station_meta: dict = {}
+    for cs_id, group in train_df.groupby("충전소ID"):
+        first = group.iloc[0]
+        station_meta[str(cs_id)] = {
+            "유형": first["유형"],
+            "시도": first["시도"],
+            "시군구": first["시군구"],
+        }
+
+    station_encodings: dict = {}
+    for cs_id, group in train_df.groupby("충전소ID"):
+        station_mean = float(group["_target_avg"].mean())
+        hour_means: dict = {
+            int(h): float(hg["_target_avg"].mean())
+            for h, hg in group.groupby("_hour")
+        }
+        for h in range(24):
+            if h not in hour_means:
+                hour_means[h] = station_mean
+        station_encodings[str(cs_id)] = {
+            "station_target_mean": station_mean,
+            "hour_means": hour_means,
+        }
+
+    config.ENCODINGS_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(station_meta, config.ENCODINGS_DIR / "station_meta.pkl")
+    joblib.dump(station_encodings, config.ENCODINGS_DIR / "station_encodings.pkl")
+    logger.info(f"Encodings exported: {len(station_meta)} stations → {config.ENCODINGS_DIR}")

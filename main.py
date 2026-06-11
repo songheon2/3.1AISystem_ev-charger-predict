@@ -2,10 +2,9 @@ import logging
 import random
 
 import numpy as np
-import pandas as pd
 
 import config
-from src.dataset import split_data
+from src.dataset import export_encodings, load_data, split_data
 from src.evaluate import (
     compute_full_clf_metrics,
     find_threshold_for_recall,
@@ -25,12 +24,7 @@ def main() -> None:
     random.seed(config.SEED)
     np.random.seed(config.SEED)
 
-    df = pd.read_csv(
-        config.DATA_DIR / config.FULL_CLF_DATA_FILE,
-        encoding="utf-8-sig",
-    )
-    df["기준시간"] = pd.to_datetime(df["기준시간"])
-    logger.info(f"Loaded data: {df.shape}")
+    df = load_data(config.DATA_DIR)
 
     for target in config.TARGET_COLS:
         logger.info(f"=== Target: {target} ===")
@@ -77,6 +71,9 @@ def main() -> None:
         metrics = compute_full_clf_metrics(y_test_full, proba_test, best_threshold)
         save_metrics(metrics, config.METRICS_DIR / f"full_clf_metrics_{safe_name}.csv")
         plot_feature_importance(clf, config.PLOT_DIR / f"fi_full_{safe_name}.png")
+
+
+    export_encodings(df, config.FULL_CLF_TRAIN_END)
 
 
 if __name__ == "__main__":

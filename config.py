@@ -6,6 +6,10 @@ DATA_DIR = ROOT_DIR / "data" / "processed"
 MODEL_DIR = ROOT_DIR / "outputs" / "models"
 PLOT_DIR = ROOT_DIR / "outputs" / "plots"
 METRICS_DIR = ROOT_DIR / "outputs" / "metrics"
+ENCODINGS_DIR = ROOT_DIR / "outputs" / "encodings"
+HISTORY_DIR = ROOT_DIR / "outputs" / "history"
+HISTORY_FILE = HISTORY_DIR / "station_history.csv"
+REALTIME_DIR = ROOT_DIR / "data" / "realtime"
 
 # --- Data ---
 SEED = 42
@@ -54,9 +58,8 @@ LGBM_CLF_PARAMS: dict = {
 CLF_THRESHOLD: float = 0.08
 
 # --- v3.0: Full Classifier (만차 여부 이진 분류) ---
-FULL_CLF_DATA_FILE: str = "ratio_dataset_202501.csv"
-FULL_CLF_TRAIN_END: str = "2025-01-24 23:00:00"
-FULL_CLF_VAL_END: str = "2025-01-27 23:00:00"
+FULL_CLF_TRAIN_END: str = "2025-10-31 23:00:00"
+FULL_CLF_VAL_END: str = "2025-11-30 23:00:00"
 FULL_CLF_NEG_RATIO: int = 5
 FULL_CLF_TARGET_RECALL: float = 0.85
 

@@ -2,10 +2,16 @@ CLAUDE.local.md
 data/raw/
 data/processed/*
 !data/processed/.gitkeep
+data/realtime/*
+!data/realtime/.gitkeep
 outputs/models/*
 !outputs/models/.gitkeep
 outputs/metrics/*
 !outputs/metrics/.gitkeep
+outputs/encodings/*
+!outputs/encodings/.gitkeep
+outputs/history/*
+!outputs/history/.gitkeep
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
